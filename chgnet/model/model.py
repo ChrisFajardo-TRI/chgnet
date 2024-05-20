@@ -4,14 +4,15 @@ import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from enum import IntEnum
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import torch
 from pymatgen.core import Structure
 from torch import Tensor, nn
 
 from chgnet.graph import CrystalGraph, CrystalGraphConverter
-from chgnet.graph.crystalgraph import datatype
+from chgnet.graph.crystalgraph import datatype, CrystalGraphAttr
 from chgnet.model.composition_model import AtomRef
 from chgnet.model.encoders import AngleEncoder, AtomEmbedding, BondEncoder
 from chgnet.model.functions import MLP, GatedMLP, find_normalization
@@ -28,6 +29,28 @@ if TYPE_CHECKING:
     from chgnet import PredTask
 
 module_dir = os.path.dirname(os.path.abspath(__file__))
+
+
+class PredictionAttr(IntEnum):
+    atoms_per_graph = 0
+    atom_fea = 1
+    site_energies = 2
+    crystal_fea = 3
+    e = 4
+    f = 5
+    m = 6
+    s = 7
+
+class Prediction(NamedTuple):
+    atoms_per_graph: Tensor
+    atom_fea: Tensor
+    site_energies: Tensor
+    crystal_fea: Tensor
+    e: Tensor
+    f: Tensor
+    m: Tensor
+    s: Tensor
+
 
 
 class CHGNet(nn.Module):
@@ -327,13 +350,13 @@ class CHGNet(nn.Module):
 
     def forward(
         self,
-        graphs: Sequence[CrystalGraph],
-        *,
+        graphs: list[CrystalGraph],
+        # *,
         task: PredTask = "e",
         return_site_energies: bool = False,
         return_atom_feas: bool = False,
         return_crystal_feas: bool = False,
-    ) -> dict[str, Tensor]:
+    ) -> Prediction:
         """Get prediction associated with input graphs
         Args:
             graphs (List): a list of CrystalGraphs
@@ -356,7 +379,7 @@ class CHGNet(nn.Module):
         )
 
         # Make batched graph
-        batched_graph = BatchedGraph.from_graphs(
+        batched_graph = get_batch_graph_from_graphs(
             graphs,
             bond_basis_expansion=self.bond_basis_expansion,
             angle_basis_expansion=self.angle_basis_expansion,
@@ -373,13 +396,23 @@ class CHGNet(nn.Module):
             return_atom_feas=return_atom_feas,
             return_crystal_feas=return_crystal_feas,
         )
-        prediction["e"] += comp_energy
+        new_e = prediction[PredictionAttr.e] + torch.tensor(comp_energy)
+        new_site_energies = None
         if return_site_energies and self.composition_model is not None:
             site_energy_shifts = self.composition_model.get_site_energies(graphs)
-            prediction["site_energies"] = [
-                i + j for i, j in zip(prediction["site_energies"], site_energy_shifts)
+            new_site_energies = [
+                i + j for i, j in zip(prediction[PredictionAttr.site_energies], site_energy_shifts)
             ]
-        return prediction
+        return Prediction(
+            atoms_per_graph=prediction.atoms_per_graph,
+            atom_fea = prediction.f,
+            site_energies = new_site_energies or prediction.site_energies,
+            crystal_fea = prediction.crystal_fea,
+            e = new_e,
+            f = prediction.f,
+            m = prediction.m,
+            s = prediction.s
+        )
 
     def _compute(
         self,
@@ -391,7 +424,7 @@ class CHGNet(nn.Module):
         return_site_energies: bool = False,
         return_atom_feas: bool = False,
         return_crystal_feas: bool = False,
-    ) -> dict:
+    ) -> Prediction:
         """Get Energy, Force, Stress, Magmom associated with input graphs
         force = - d(Energy)/d(atom_positions)
         stress = 1/V * d(Energy)/d(strain).
@@ -420,18 +453,18 @@ class CHGNet(nn.Module):
                 m (Tensor) : magnetic moments of sites [num_batch_atoms, 3]
         """
         prediction = {}
-        atoms_per_graph = torch.bincount(g.atom_owners)
+        atoms_per_graph = torch.bincount(g[BatchedGraphAttr.atom_owners])
         prediction["atoms_per_graph"] = atoms_per_graph
 
         # Embed Atoms, Bonds and Angles
         atom_feas = self.atom_embedding(
             g.atomic_numbers - 1
         )  # let H be the first embedding column
-        bond_feas = self.bond_embedding(g.bond_bases_ag)
-        bond_weights_ag = self.bond_weights_ag(g.bond_bases_ag)
-        bond_weights_bg = self.bond_weights_bg(g.bond_bases_bg)
+        bond_feas = self.bond_embedding(g[BatchedGraphAttr.bond_bases_ag])
+        bond_weights_ag = self.bond_weights_ag(g[BatchedGraphAttr.bond_bases_ag])
+        bond_weights_bg = self.bond_weights_bg(g[BatchedGraphAttr.bond_bases_bg])
         if len(g.angle_bases) != 0:
-            angle_feas = self.angle_embedding(g.angle_bases)
+            angle_feas = self.angle_embedding(g[BatchedGraphAttr.angle_bases])
 
         # Message Passing
         for idx, (atom_layer, bond_layer, angle_layer) in enumerate(
@@ -442,8 +475,8 @@ class CHGNet(nn.Module):
                 atom_feas=atom_feas,
                 bond_feas=bond_feas,
                 bond_weights=bond_weights_ag,
-                atom_graph=g.batched_atom_graph,
-                directed2undirected=g.directed2undirected,
+                atom_graph=g[BatchedGraphAttr.batched_atom_graph],
+                directed2undirected=g[BatchedGraphAttr.directed2undirected],
             )
 
             # Bond Conv
@@ -453,7 +486,7 @@ class CHGNet(nn.Module):
                     bond_feas=bond_feas,
                     bond_weights=bond_weights_bg,
                     angle_feas=angle_feas,
-                    bond_graph=g.batched_bond_graph,
+                    bond_graph=g[BatchedGraphAttr.batched_bond_graph],
                 )
 
                 # Angle Update
@@ -462,7 +495,7 @@ class CHGNet(nn.Module):
                         atom_feas=atom_feas,
                         bond_feas=bond_feas,
                         angle_feas=angle_feas,
-                        bond_graph=g.batched_bond_graph,
+                        bond_graph=g[BatchedGraphAttr.batched_bond_graph],
                     )
             if idx == self.n_conv - 2:
                 if return_atom_feas:
@@ -481,8 +514,8 @@ class CHGNet(nn.Module):
             atom_feas=atom_feas,
             bond_feas=bond_feas,
             bond_weights=bond_weights_ag,
-            atom_graph=g.batched_atom_graph,
-            directed2undirected=g.directed2undirected,
+            atom_graph=g[BatchedGraphAttr.batched_atom_graph],
+            directed2undirected=g[BatchedGraphAttr.directed2undirected],
         )
         if self.readout_norm is not None:
             atom_feas = self.readout_norm(atom_feas)
@@ -490,7 +523,7 @@ class CHGNet(nn.Module):
         # Aggregate nodes and ReadOut
         if self.mlp_first:
             energies = self.mlp(atom_feas)
-            energy = self.pooling(energies, g.atom_owners).view(-1)
+            energy = self.pooling(energies, g[BatchedGraphAttr.atom_owners]).view(-1)
             if return_site_energies:
                 prediction["site_energies"] = torch.split(
                     energies.squeeze(1), atoms_per_graph.tolist()
@@ -498,7 +531,7 @@ class CHGNet(nn.Module):
             if return_crystal_feas:
                 prediction["crystal_fea"] = self.pooling(atom_feas, g.atom_owners)
         else:  # ave or attn to create crystal_fea first
-            crystal_feas = self.pooling(atom_feas, g.atom_owners)
+            crystal_feas = self.pooling(atom_feas, g[BatchedGraphAttr.atom_owners])
             energy = self.mlp(crystal_feas).view(-1) * atoms_per_graph
             if return_crystal_feas:
                 prediction["crystal_fea"] = crystal_feas
@@ -509,17 +542,17 @@ class CHGNet(nn.Module):
             # so its gradient need to be calculated later
             # The graphs of force and stress need to be created for same reason.
             force = torch.autograd.grad(
-                energy.sum(), g.atom_positions, create_graph=True, retain_graph=True
+                energy.sum(), g[BatchedGraphAttr.atom_positions], create_graph=True, retain_graph=True
             )
             prediction["f"] = [-1 * force_dim for force_dim in force]
 
         # Compute stress
         if compute_stress:
             stress = torch.autograd.grad(
-                energy.sum(), g.strains, create_graph=True, retain_graph=True
+                energy.sum(), g[BatchedGraphAttr.strains], create_graph=True, retain_graph=True
             )
             # Convert Stress unit from eV/A^3 to GPa
-            scale = 1 / g.volumes * 160.21766208
+            scale = 1 / g[BatchedGraphAttr.volumes] * 160.21766208
             stress = [i * j for i, j in zip(stress, scale)]
             prediction["s"] = stress
 
@@ -528,7 +561,16 @@ class CHGNet(nn.Module):
             energy /= atoms_per_graph
         prediction["e"] = energy
 
-        return prediction
+        return Prediction(
+            atoms_per_graph=torch.tensor(prediction["atoms_per_graph"]),
+            atom_fea = torch.tensor(prediction["atom_fea"]) if prediction.get("atom_fea") else torch.tensor(-123),
+            site_energies = torch.tensor(prediction["site_energies"]) if prediction.get("site_energies") else torch.tensor(-123),
+            crystal_fea = torch.tensor(prediction["crystal_fea"]) if prediction.get("crystal_fea") else torch.tensor(-123),
+            e = torch.tensor(prediction["e"]),
+            f = torch.tensor(prediction["f"]) if prediction.get("f") else torch.tensor(-123),
+            m = torch.tensor(prediction["m"]) if prediction.get("m") else torch.tensor(-123),
+            s = torch.tensor(prediction["s"]) if prediction.get("s") else torch.tensor(-123)
+        )
 
     def predict_structure(
         self,
@@ -725,8 +767,21 @@ class CHGNet(nn.Module):
         return model
 
 
-@dataclass
-class BatchedGraph:
+class BatchedGraphAttr(IntEnum):
+    atomic_numbers = 0
+    bond_bases_ag = 1
+    bond_bases_bg = 2
+    angle_bases = 3
+    batched_atom_graph = 4
+    batched_bond_graph = 5
+    atom_owners = 6
+    directed2undirected = 7
+    atom_positions = 8
+    strains = 9
+    volumes = 10
+
+
+class BatchedGraph(NamedTuple):
     """Batched crystal graph for parallel computing.
 
     Attributes:
@@ -769,13 +824,11 @@ class BatchedGraph:
     strains: Sequence[Tensor]
     volumes: Sequence[Tensor] | Tensor
 
-    @classmethod
-    def from_graphs(
-        cls,
+
+def get_batch_graph_from_graphs(
         graphs: Sequence[CrystalGraph],
         bond_basis_expansion: nn.Module,
         angle_basis_expansion: nn.Module,
-        *,
         compute_stress: bool = False,
     ) -> BatchedGraph:
         """Featurize and assemble a list of graphs.
@@ -799,30 +852,30 @@ class BatchedGraph:
 
         for graph_idx, graph in enumerate(graphs):
             # Atoms
-            n_atom = graph.atomic_number.shape[0]
-            atomic_numbers.append(graph.atomic_number)
+            n_atom = graph[CrystalGraphAttr.atomic_number].shape[0]
+            atomic_numbers.append(graph[CrystalGraphAttr.atomic_number])
 
             # Lattice
             if compute_stress:
-                strain = graph.lattice.new_zeros([3, 3], requires_grad=True)
-                lattice = graph.lattice @ (
+                strain = graph[CrystalGraphAttr.lattice].new_zeros([3, 3], requires_grad=True)
+                lattice = graph[CrystalGraphAttr.lattice] @ (
                     torch.eye(3, dtype=datatype).to(strain.device) + strain
                 )
             else:
                 strain = None
-                lattice = graph.lattice
+                lattice =  graph[CrystalGraphAttr.lattice]
             volumes.append(
                 torch.dot(lattice[0], torch.linalg.cross(lattice[1], lattice[2]))
             )
             strains.append(strain)
 
             # Bonds
-            atom_cart_coords = graph.atom_frac_coord @ lattice
+            atom_cart_coords = graph[CrystalGraphAttr.atom_frac_coord] @ lattice
             bond_basis_ag, bond_basis_bg, bond_vectors = bond_basis_expansion(
-                center=atom_cart_coords[graph.atom_graph[:, 0]],
-                neighbor=atom_cart_coords[graph.atom_graph[:, 1]],
-                undirected2directed=graph.undirected2directed,
-                image=graph.neighbor_image,
+                center=atom_cart_coords[graph[CrystalGraphAttr.atom_graph][:, 0]],
+                neighbor=atom_cart_coords[graph[CrystalGraphAttr.atom_graph][:, 1]],
+                undirected2directed=graph[CrystalGraphAttr.undirected2directed],
+                image= graph[CrystalGraphAttr.neighbor_image],
                 lattice=lattice,
             )
             atom_positions.append(atom_cart_coords)
@@ -830,27 +883,27 @@ class BatchedGraph:
             bond_bases_bg.append(bond_basis_bg)
 
             # Indexes
-            batched_atom_graph.append(graph.atom_graph + atom_offset_idx)
-            directed2undirected.append(graph.directed2undirected + n_undirected)
+            batched_atom_graph.append(graph[CrystalGraphAttr.atom_graph] + atom_offset_idx)
+            directed2undirected.append(graph[CrystalGraphAttr.directed2undirected] + n_undirected)
 
             # Angles
             # Here we use directed edges to calculate angles, and
             # keep only the undirected graph index in the bond_graph,
             # So the number of columns in bond_graph reduce from 5 to 3
-            if len(graph.bond_graph) != 0:
+            if len(graph[CrystalGraphAttr.bond_graph]) != 0:
                 bond_vecs_i = torch.index_select(
-                    bond_vectors, 0, graph.bond_graph[:, 2]
+                    bond_vectors, 0, graph[CrystalGraphAttr.bond_graph][:, 2]
                 )
                 bond_vecs_j = torch.index_select(
-                    bond_vectors, 0, graph.bond_graph[:, 4]
+                    bond_vectors, 0, graph[CrystalGraphAttr.bond_graph][:, 4]
                 )
                 angle_basis = angle_basis_expansion(bond_vecs_i, bond_vecs_j)
                 angle_bases.append(angle_basis)
 
-                bond_graph = graph.bond_graph.new_zeros([graph.bond_graph.shape[0], 3])
-                bond_graph[:, 0] = graph.bond_graph[:, 0] + atom_offset_idx
-                bond_graph[:, 1] = graph.bond_graph[:, 1] + n_undirected
-                bond_graph[:, 2] = graph.bond_graph[:, 3] + n_undirected
+                bond_graph = graph[CrystalGraphAttr.bond_graph].new_zeros([graph[CrystalGraphAttr.bond_graph].shape[0], 3])
+                bond_graph[:, 0] = graph[CrystalGraphAttr.bond_graph][:, 0] + atom_offset_idx
+                bond_graph[:, 1] = graph[CrystalGraphAttr.bond_graph][:, 1] + n_undirected
+                bond_graph[:, 2] = graph[CrystalGraphAttr.bond_graph][:, 3] + n_undirected
                 batched_bond_graph.append(bond_graph)
 
             atom_owners.append(torch.ones(n_atom, requires_grad=False) * graph_idx)
@@ -875,7 +928,7 @@ class BatchedGraph:
         directed2undirected = torch.cat(directed2undirected, dim=0)
         volumes = torch.tensor(volumes, dtype=datatype, device=atomic_numbers.device)
 
-        return cls(
+        return BatchedGraph(
             atomic_numbers=atomic_numbers,
             bond_bases_ag=bond_bases_ag,
             bond_bases_bg=bond_bases_bg,

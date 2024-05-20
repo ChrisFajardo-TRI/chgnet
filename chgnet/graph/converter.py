@@ -179,11 +179,11 @@ class CrystalGraphConverter(nn.Module):
             undirected2directed=undirected2directed,
             bond_graph=bond_graph,
             lattice=lattice,
-            graph_id=graph_id,
-            mp_id=mp_id,
-            composition=structure.composition.formula,
-            atom_graph_cutoff=self.atom_graph_cutoff,
-            bond_graph_cutoff=self.bond_graph_cutoff,
+            # graph_id=torch.tensor(-123),
+            # mp_id=torch.tensor(-123),
+            # composition=torch.tensor(-123),
+            atom_graph_cutoff=torch.tensor(self.atom_graph_cutoff),
+            bond_graph_cutoff=torch.tensor(self.bond_graph_cutoff),
         )
 
     @staticmethod

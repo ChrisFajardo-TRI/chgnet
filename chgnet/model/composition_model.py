@@ -11,10 +11,10 @@ from torch import Tensor, nn
 from chgnet.model.functions import GatedMLP, find_activation
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import list
     from pathlib import Path
 
-    from chgnet.graph.crystalgraph import CrystalGraph
+from chgnet.graph.crystalgraph import CrystalGraph, CrystalGraphAttr
 
 
 class CompositionModel(nn.Module):
@@ -127,8 +127,8 @@ class AtomRef(nn.Module):
 
     def fit(
         self,
-        structures_or_graphs: Sequence[Structure | CrystalGraph],
-        energies: Sequence[float],
+        structures_or_graphs: list[Structure | CrystalGraph],
+        energies: list[float],
     ) -> None:
         """Fit the model to a list of crystals and energies.
 
@@ -182,10 +182,10 @@ class AtomRef(nn.Module):
         composition_feas = []
         for graph in graphs:
             composition_fea = torch.bincount(
-                graph.atomic_number - 1, minlength=self.max_num_elements
+                graph[CrystalGraphAttr.atomic_number] - 1, minlength=self.max_num_elements
             )
             if self.is_intensive:
-                n_atom = graph.atomic_number.shape[0]
+                n_atom = graph[CrystalGraphAttr.atomic_number].shape[0]
                 composition_fea = composition_fea / n_atom
             composition_feas.append(composition_fea)
         return torch.stack(composition_feas, dim=0).float()
