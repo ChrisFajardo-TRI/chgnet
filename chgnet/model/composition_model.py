@@ -99,7 +99,7 @@ class AtomRef(nn.Module):
         self.fc = nn.Linear(max_num_elements, 1, bias=False)
         self.fitted = False
 
-    def forward(self, graphs: list[CrystalGraph]) -> Tensor:
+    def forward(self, graph: CrystalGraph) -> Tensor:
         """Get the energy of a list of CrystalGraphs.
 
         Args:
@@ -110,7 +110,7 @@ class AtomRef(nn.Module):
         """
         if not self.fitted:
             raise ValueError("composition model needs to be fitted first!")
-        composition_feas = self._assemble_graphs(graphs)
+        composition_feas = self._assemble_graphs(graph)
         return self._get_energy(composition_feas)
 
     def _get_energy(self, composition_feas: Tensor) -> Tensor:
@@ -172,7 +172,7 @@ class AtomRef(nn.Module):
         self.fc.load_state_dict(state_dict)
         self.fitted = True
 
-    def _assemble_graphs(self, graphs: list[CrystalGraph]) -> Tensor:
+    def _assemble_graphs(self, graph: CrystalGraph) -> Tensor:
         """Assemble a list of graphs into one-hot composition encodings
         Args:
             graphs (list[Tensor]): a list of CrystalGraphs
@@ -180,17 +180,16 @@ class AtomRef(nn.Module):
             assembled batch_graph that contains all information for model.
         """
         composition_feas = []
-        for graph in graphs:
-            composition_fea = torch.bincount(
-                graph[CrystalGraphAttr.atomic_number] - 1, minlength=self.max_num_elements
-            )
-            if self.is_intensive:
-                n_atom = graph[CrystalGraphAttr.atomic_number].shape[0]
-                composition_fea = composition_fea / n_atom
-            composition_feas.append(composition_fea)
+        composition_fea = torch.bincount(
+            graph[CrystalGraphAttr.atomic_number] - 1, minlength=self.max_num_elements
+        )
+        if self.is_intensive:
+            n_atom = graph[CrystalGraphAttr.atomic_number].shape[0]
+            composition_fea = composition_fea / n_atom
+        composition_feas.append(composition_fea)
         return torch.stack(composition_feas, dim=0).float()
 
-    def get_site_energies(self, graphs: list[CrystalGraph]) -> list[Tensor]:
+    def get_site_energies(self, graph: CrystalGraph) -> list[Tensor]:
         """Predict the site energies given a list of CrystalGraphs.
 
         Args:
@@ -201,7 +200,7 @@ class AtomRef(nn.Module):
         """
         return [
             self.fc.state_dict()["weight"][0, graph.atomic_number - 1]
-            for graph in graphs
+            for graph in [graph]
         ]
 
     def initialize_from(self, dataset: str) -> None:

@@ -1,14 +1,10 @@
-import numpy as np
 import torch
 from pymatgen.core import Structure
 
 from chgnet.model import CHGNet
 
-# If the above line fails in Google Colab due to numpy version issue,
-# please restart the runtime, and the problem will be solved
 
-np.set_printoptions(precision=4, suppress=True)
-
+# Replace torch.bincount as not supported by ONNX
 def new_bincount(input_tensor, minlength: int = 0):
     counts = torch.tensor([], dtype=torch.int64)
     output_length = max(minlength, int(torch.max(input_tensor)) + 1)
@@ -21,18 +17,21 @@ def new_bincount(input_tensor, minlength: int = 0):
 torch.bincount=new_bincount
 
 
+# Normal model usage
 structure = Structure.from_file("/Users/chrisfajardo/git_repos/pochi/Li.cif")
-
 chgnet = CHGNet.load()
-graph = list(chgnet.graph_converter(structure))
+graph = chgnet.graph_converter(structure)
 chgnet = chgnet.to("cpu")
 chgnet = chgnet.eval()
-print(chgnet.forward([graph]))
+print(chgnet.forward(graph))
 
-traced = torch.jit.trace(chgnet, ([graph],))
+# Trace model
+traced = torch.jit.trace(chgnet, (graph,))
+
+# Test save/load as Torchscript
 traced.save("chgnet.torchscript")
-
 c = torch.jit.load("chgnet.torchscript")
-c.forward([graph])
+print(c.forward(graph))
 
-torch.onnx.export(traced, [graph], f="chgnet.onnx")
+# Save as ONNX
+torch.onnx.export(traced, (graph,), f="chgnet.onnx", input_names =['graph'])

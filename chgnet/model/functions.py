@@ -33,7 +33,7 @@ def aggregate(data: Tensor, owners: Tensor, *, average=True, num_owner=None) -> 
 
     # make sure this operation is done on the same device of data and owners
     output = data.new_zeros([bin_count.shape[0], data.shape[1]])
-    output = output.index_add_(0, owners, data)
+    #output = output.index_add_(0, owners, data)
     if average:
         output = (output.T / bin_count).T
     return output

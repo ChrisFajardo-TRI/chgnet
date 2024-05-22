@@ -350,7 +350,7 @@ class CHGNet(nn.Module):
 
     def forward(
         self,
-        graphs: list[CrystalGraph],
+        graph: CrystalGraph,
         # *,
         task: PredTask = "e",
         return_site_energies: bool = False,
@@ -375,12 +375,12 @@ class CHGNet(nn.Module):
         """
         # Optionally, make composition model prediction
         comp_energy = (
-            0 if self.composition_model is None else self.composition_model(graphs)
+            0 if self.composition_model is None else self.composition_model(graph)
         )
 
         # Make batched graph
         batched_graph = get_batch_graph_from_graphs(
-            graphs,
+            graph,
             bond_basis_expansion=self.bond_basis_expansion,
             angle_basis_expansion=self.angle_basis_expansion,
             compute_stress="s" in task,
@@ -399,7 +399,7 @@ class CHGNet(nn.Module):
         new_e = prediction[PredictionAttr.e] + torch.tensor(comp_energy)
         new_site_energies = None
         if return_site_energies and self.composition_model is not None:
-            site_energy_shifts = self.composition_model.get_site_energies(graphs)
+            site_energy_shifts = self.composition_model.get_site_energies(graph)
             new_site_energies = [
                 i + j for i, j in zip(prediction[PredictionAttr.site_energies], site_energy_shifts)
             ]
@@ -826,7 +826,7 @@ class BatchedGraph(NamedTuple):
 
 
 def get_batch_graph_from_graphs(
-        graphs: Sequence[CrystalGraph],
+        graph: CrystalGraph,
         bond_basis_expansion: nn.Module,
         angle_basis_expansion: nn.Module,
         compute_stress: bool = False,
@@ -850,7 +850,7 @@ def get_batch_graph_from_graphs(
         atom_owners = []
         atom_offset_idx = n_undirected = 0
 
-        for graph_idx, graph in enumerate(graphs):
+        for graph_idx, graph in enumerate([graph]):
             # Atoms
             n_atom = graph[CrystalGraphAttr.atomic_number].shape[0]
             atomic_numbers.append(graph[CrystalGraphAttr.atomic_number])
